@@ -795,7 +795,13 @@ type urlInfoOption struct {
 }
 
 func extractURL(s string) (*urlInfo, error) {
-	s = strings.TrimPrefix(s, "mongodb://")
+	isSRV := strings.HasPrefix(s, "mongodb+srv://")
+	if isSRV {
+		s = s[len("mongodb+srv://"):]
+	} else {
+		s = strings.TrimPrefix(s, "mongodb://")
+	}
+
 	info := &urlInfo{options: []urlInfoOption{}}
 
 	if c := strings.Index(s, "?"); c != -1 {
@@ -831,6 +837,39 @@ func extractURL(s string) (*urlInfo, error) {
 		s = s[:c]
 	}
 	info.addrs = strings.Split(s, ",")
+
+	if isSRV {
+		if len(info.addrs) == 0 {
+			return nil, errors.New("invalid address")
+		}
+		// auto turn on ssl
+		info.options = append(info.options, urlInfoOption{key: "ssl", value: "true"})
+
+		// manage additional options
+		srvAddr := info.addrs[0]
+		params, err := net.LookupTXT(srvAddr)
+		if err != nil {
+			return nil, err
+		}
+		for _, pair := range strings.FieldsFunc(params[0], isOptSep) {
+			l := strings.SplitN(pair, "=", 2)
+			if len(l) != 2 || l[0] == "" || l[1] == "" {
+				return nil, errors.New("connection option must be key=value: " + pair)
+			}
+			info.options = append(info.options, urlInfoOption{key: l[0], value: l[1]})
+		}
+
+		// fetch addresses from DNS
+		_, addrs, err := net.LookupSRV("mongodb", "tcp", srvAddr)
+		if err != nil {
+			return nil, err
+		}
+		addresses := make([]string, 0, len(addrs))
+		for _, addr := range addrs {
+			addresses = append(addresses, fmt.Sprintf("%v:%v", strings.TrimSuffix(addr.Target, "."), addr.Port))
+		}
+		info.addrs = addresses
+	}
 
 	for i := 0; i < len(info.addrs); i++ {
 		if strings.Contains(info.addrs[i], "/") {
